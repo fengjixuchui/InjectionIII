@@ -5,9 +5,10 @@
 //  Created by John Holdsworth on 06/11/2017.
 //  Copyright © 2017 John Holdsworth. All rights reserved.
 //
+//  $Id: //depot/ResidentEval/InjectionBundle/InjectionClient.mm#74 $
+//
 
 #import "InjectionClient.h"
-#import "InjectionServer.h"
 
 #ifdef __IPHONE_OS_VERSION_MIN_REQUIRED
 #if __has_include("tvOSInjection10-Swift.h")
@@ -103,9 +104,12 @@ static struct {
     // connect to InjetionIII.app using sicket
     if (InjectionClient *client = [self connectTo:INJECTION_ADDRESS])
         [client run];
-    else
+    else {
         printf("💉 Injection loaded but could not connect. Is InjectionIII.app running?\n");
-
+#ifndef __IPHONE_OS_VERSION_MIN_REQUIRED
+        printf("⚠️ For a macOS app you need to turn off the sandbox to connect. ⚠️\n");
+#endif
+    }
 }
 
 - (void)runInBackground {
@@ -148,12 +152,23 @@ static struct {
             }
             break;
         }
-        case InjectionProject: {
+        case InjectionConnected: {
             NSString *projectFile = [self readString];
             [SwiftEval sharedInstance].projectFile = projectFile;
             [SwiftEval sharedInstance].derivedLogs = nil;
-            printf("💉 Injection connected, watching %s/**\n",
-                   projectFile.stringByDeletingLastPathComponent.UTF8String);
+            printf("💉 Injection connected 👍\n");
+            NSString *pbxFile = [projectFile
+                 stringByAppendingPathComponent:@"project.pbxproj"];
+            NSString *pbxContents = [NSString
+                 stringWithContentsOfFile:pbxFile
+                 encoding:NSUTF8StringEncoding error:NULL];
+            if (![pbxContents containsString:@"-interposable"])
+                printf("💉 Have you remembered to add \"-Xlinker -interposable\" to your project's \"Other Linker Flags\"?\n");
+            break;
+        }
+        case InjectionWatching: {
+            NSString *directory = [self readString];
+            printf("💉 Watching %s/**\n", directory.UTF8String);
             break;
         }
         case InjectionLog:
@@ -162,6 +177,16 @@ static struct {
         case InjectionSigned:
             [writer writeString:[self readString]];
             break;
+        case InjectionTrace:
+            [SwiftTrace traceMainBundleWithSubLevels:0];
+            break;
+        case InjectionUntrace:
+            [SwiftTrace removeAllTraces];
+            break;
+        case InjectionIdeProcPath: {
+            [SwiftEval sharedInstance].lastIdeProcPath = [self readString];
+            break;
+        }
         default: {
             NSString *changed = [self readString];
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -195,10 +220,12 @@ static struct {
                     else
                         printf("Eval only works on NSObject subclasses\n");
                     [Xprobe writeString:[NSString stringWithFormat:@"$('BUSY%d').hidden = true; ", pathID]];
+                    break;
                 }
 #endif
                 default:
-                    [self writeCommand:InjectionError withString:@"Invalid command"];
+                    [self writeCommand:InjectionError withString:[NSString
+                          stringWithFormat:@"Invalid command #%d", command]];
                     break;
                 }
 

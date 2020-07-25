@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="14460.31" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none" useAutolayout="YES" customObjectInstantitationMethod="direct">
+<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="16096" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none" useAutolayout="YES" customObjectInstantitationMethod="direct">
     <dependencies>
         <deployment identifier="macosx"/>
-        <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="14460.31"/>
+        <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="16096"/>
         <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
     </dependencies>
     <objects>
@@ -13,13 +13,16 @@
         </customObject>
         <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
         <customObject id="-3" userLabel="Application" customClass="NSObject"/>
-        <customObject id="Voe-Tx-rLC" customClass="AppDelegate">
+        <customObject id="Voe-Tx-rLC" customClass="AppDelegate" customModule="InjectionIII">
             <connections>
                 <outlet property="enableVaccineItem" destination="cCv-GY-3Rv" id="Joe-DQ-AWO"/>
                 <outlet property="enableWatcher" destination="0iA-WA-gxc" id="vVT-sI-q78"/>
                 <outlet property="enabledTDDItem" destination="Mdd-tb-kGc" id="ccs-nb-DKk"/>
+                <outlet property="frontItem" destination="wFq-Rv-gfa" id="MPU-fL-HYl"/>
+                <outlet property="remoteItem" destination="of9-Ja-9Yf" id="z57-Ut-oxK"/>
                 <outlet property="startItem" destination="vsd-ll-3nr" id="ODN-wa-BTp"/>
                 <outlet property="statusMenu" destination="V8Q-mq-A2f" id="Epo-HD-J21"/>
+                <outlet property="traceItem" destination="Kkx-ex-NCv" id="EXz-O7-K34"/>
                 <outlet property="window" destination="QvC-M9-y7g" id="gIp-Ho-8D9"/>
                 <outlet property="windowItem" destination="aUF-d1-5bR" id="MxW-hd-aZ7"/>
                 <outlet property="xprobeItem" destination="R6p-Yl-7qz" id="Ebf-Kl-PWB"/>
@@ -648,12 +651,13 @@
                     </menu>
                 </menuItem>
             </items>
+            <point key="canvasLocation" x="141" y="154"/>
         </menu>
         <window title="InjectionIII" allowsToolTipsWhenApplicationIsInactive="NO" autorecalculatesKeyViewLoop="NO" releasedWhenClosed="NO" visibleAtLaunch="NO" animationBehavior="default" id="QvC-M9-y7g">
             <windowStyleMask key="styleMask" titled="YES" closable="YES" miniaturizable="YES" resizable="YES"/>
             <windowPositionMask key="initialPositionMask" leftStrut="YES" rightStrut="YES" topStrut="YES" bottomStrut="YES"/>
             <rect key="contentRect" x="335" y="390" width="480" height="360"/>
-            <rect key="screenRect" x="0.0" y="0.0" width="1680" height="1027"/>
+            <rect key="screenRect" x="0.0" y="0.0" width="2560" height="1417"/>
             <view key="contentView" wantsLayer="YES" id="EiT-Mj-1SZ">
                 <rect key="frame" x="0.0" y="0.0" width="480" height="360"/>
                 <autoresizingMask key="autoresizingMask"/>
@@ -667,8 +671,9 @@
                         <action selector="autoInject:" target="Voe-Tx-rLC" id="YDX-ZY-Oim"/>
                     </connections>
                 </menuItem>
-                <menuItem title="Open Project" id="XlL-4Y-oKk">
+                <menuItem title="Open Project" toolTip="Select Project directory to watch for file edits" id="XlL-4Y-oKk">
                     <modifierMask key="keyEquivalentModifierMask"/>
+                    <accessibility description="Open Project"/>
                     <connections>
                         <action selector="openProject:" target="Voe-Tx-rLC" id="ZLH-lf-p4H"/>
                     </connections>
@@ -686,51 +691,94 @@
                         </items>
                     </menu>
                 </menuItem>
-                <menuItem title="File Watcher" state="on" id="0iA-WA-gxc">
+                <menuItem title="Add Directory" toolTip="Select additional project directory to watch" id="335-34-Y36">
+                    <modifierMask key="keyEquivalentModifierMask"/>
+                    <accessibility description="Add Project"/>
+                    <connections>
+                        <action selector="addDirectory:" target="Voe-Tx-rLC" id="Z4L-RL-lKH"/>
+                    </connections>
+                </menuItem>
+                <menuItem title="File Watcher" state="on" toolTip="Enable/Disable file watcher" id="0iA-WA-gxc">
                     <modifierMask key="keyEquivalentModifierMask"/>
                     <connections>
                         <action selector="toggleState:" target="Voe-Tx-rLC" id="old-T7-DMa"/>
                     </connections>
                 </menuItem>
-                <menuItem title="Enable Vaccine" id="cCv-GY-3Rv" userLabel="Enabled Vaccine">
+                <menuItem title="Order Front" toolTip="Order Front SImulator" id="wFq-Rv-gfa">
                     <modifierMask key="keyEquivalentModifierMask"/>
+                    <connections>
+                        <action selector="toggleState:" target="Voe-Tx-rLC" id="LCw-9g-CaP"/>
+                    </connections>
+                </menuItem>
+                <menuItem title="Enable Vaccine" toolTip="Enable Vaccine" id="cCv-GY-3Rv" userLabel="Enabled Vaccine">
+                    <modifierMask key="keyEquivalentModifierMask"/>
+                    <accessibility description="Enable Vaccine"/>
                     <connections>
                         <action selector="toggleVaccine:" target="Voe-Tx-rLC" id="6d6-vp-FLr"/>
                     </connections>
                 </menuItem>
-                <menuItem title="Enable TDD" id="Mdd-tb-kGc">
+                <menuItem title="Enable TDD" toolTip="Enable running tests on file change" id="Mdd-tb-kGc">
                     <modifierMask key="keyEquivalentModifierMask"/>
+                    <accessibility description="Enable TDD"/>
                     <connections>
                         <action selector="toggleTDD:" target="Voe-Tx-rLC" id="hjO-wo-Oy4"/>
                     </connections>
                 </menuItem>
-                <menuItem title="Run Xprobe" id="R6p-Yl-7qz">
+                <menuItem title="Run Xprobe" toolTip="Inspect app object state" id="R6p-Yl-7qz">
                     <modifierMask key="keyEquivalentModifierMask"/>
+                    <accessibility description="Open Xprobe"/>
                     <connections>
                         <action selector="runXprobe:" target="Voe-Tx-rLC" id="OLt-ZD-lyd"/>
                     </connections>
                 </menuItem>
-                <menuItem title="Window" hidden="YES" id="aUF-d1-5bR">
+                <menuItem title="Trace App" toolTip="Log app messaging" id="Kkx-ex-NCv">
                     <modifierMask key="keyEquivalentModifierMask"/>
-                    <menu key="submenu" title="Window" systemMenu="window" id="Td7-aD-5lo">
+                    <accessibility description="Trace App"/>
+                    <connections>
+                        <action selector="traceApp:" target="Voe-Tx-rLC" id="5zd-Ho-CaT"/>
+                    </connections>
+                </menuItem>
+                <menuItem title="Remote" id="of9-Ja-9Yf">
+                    <modifierMask key="keyEquivalentModifierMask"/>
+                    <menu key="submenu" title="Remote" id="eGx-OC-usD">
                         <items>
-                            <menuItem title="Minimize" keyEquivalent="m" id="OY7-WF-poV">
+                            <menuItem title="Start Server" toolTip="Control device from desktop" id="7Om-BV-MqZ">
+                                <modifierMask key="keyEquivalentModifierMask"/>
+                                <accessibility description="Trace App"/>
                                 <connections>
-                                    <action selector="performMiniaturize:" target="-1" id="VwT-WD-YPe"/>
+                                    <action selector="startRemote:" target="Voe-Tx-rLC" id="odg-2Q-T1g"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Zoom" id="R4o-n2-Eq4">
+                            <menuItem title="Stop Server" id="Fa8-hf-Yom">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
-                                    <action selector="performZoom:" target="-1" id="DIl-cC-cCs"/>
+                                    <action selector="stopRemote:" target="Voe-Tx-rLC" id="Fbl-rZ-MWg"/>
                                 </connections>
                             </menuItem>
-                            <menuItem isSeparatorItem="YES" id="eu3-7i-yIM"/>
-                            <menuItem title="Bring All to Front" id="LE2-aR-0XJ">
+                            <menuItem title="Window" id="aUF-d1-5bR">
                                 <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="arrangeInFront:" target="-1" id="DRN-fu-gQh"/>
-                                </connections>
+                                <menu key="submenu" title="Window" systemMenu="window" id="Td7-aD-5lo">
+                                    <items>
+                                        <menuItem title="Minimize" keyEquivalent="m" id="OY7-WF-poV">
+                                            <connections>
+                                                <action selector="performMiniaturize:" target="-1" id="VwT-WD-YPe"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem title="Zoom" id="R4o-n2-Eq4">
+                                            <modifierMask key="keyEquivalentModifierMask"/>
+                                            <connections>
+                                                <action selector="performZoom:" target="-1" id="DIl-cC-cCs"/>
+                                            </connections>
+                                        </menuItem>
+                                        <menuItem isSeparatorItem="YES" id="eu3-7i-yIM"/>
+                                        <menuItem title="Bring All to Front" id="LE2-aR-0XJ">
+                                            <modifierMask key="keyEquivalentModifierMask"/>
+                                            <connections>
+                                                <action selector="arrangeInFront:" target="-1" id="DRN-fu-gQh"/>
+                                            </connections>
+                                        </menuItem>
+                                    </items>
+                                </menu>
                             </menuItem>
                         </items>
                     </menu>
@@ -742,14 +790,15 @@
                         <action selector="orderFrontStandardAboutPanel:" target="-1" id="b6u-Vx-pO5"/>
                     </connections>
                 </menuItem>
-                <menuItem title="Help/Donate" hidden="YES" id="kFj-jW-1uq">
+                <menuItem title="Help/README" id="kFj-jW-1uq">
                     <modifierMask key="keyEquivalentModifierMask"/>
                     <connections>
-                        <action selector="donate:" target="Voe-Tx-rLC" id="Scj-Z3-yFA"/>
+                        <action selector="help:" target="Voe-Tx-rLC" id="Scj-Z3-yFA"/>
                     </connections>
                 </menuItem>
-                <menuItem title="Quit Injection" id="LUw-n8-2Gj">
+                <menuItem title="Quit Injection" toolTip="Quit InjectionIII" id="LUw-n8-2Gj">
                     <modifierMask key="keyEquivalentModifierMask"/>
+                    <accessibility description="Quit"/>
                     <connections>
                         <action selector="terminate:" target="-3" id="rW8-Je-8vQ"/>
                     </connections>
@@ -757,5 +806,6 @@
             </items>
             <point key="canvasLocation" x="112" y="602.5"/>
         </menu>
+        <userDefaultsController representsSharedInstance="YES" id="mc2-qN-cFK"/>
     </objects>
 </document>

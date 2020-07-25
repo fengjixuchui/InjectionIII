@@ -5,7 +5,7 @@
 //  Created by John Holdsworth on 05/11/2017.
 //  Copyright © 2017 John Holdsworth. All rights reserved.
 //
-//  $Id: //depot/ResidentEval/InjectionBundle/SwiftInjection.swift#48 $
+//  $Id: //depot/ResidentEval/InjectionBundle/SwiftInjection.swift#63 $
 //
 //  Cut-down version of code injection in Swift. Uses code
 //  from SwiftEval.swift to recompile and reload class.
@@ -97,6 +97,8 @@ public class SwiftInjection: NSObject {
         return injectionNumber
     }
 
+    static var interposed = [UnsafeMutableRawPointer: UnsafeMutableRawPointer]()
+
     @objc
     public class func inject(tmpfile: String) throws {
         let newClasses = try SwiftEval.instance.loadAndInject(tmpfile: tmpfile)
@@ -120,11 +122,12 @@ public class SwiftInjection: NSObject {
             let newSwiftCondition = classMetadata.pointee.Data & 0x3 != 0
             let isSwiftClass = newSwiftCondition || oldSwiftCondition
             if isSwiftClass {
-              // Swift equivalent of Swizzling
+                // Old mechanism for Swift equivalent of "Swizzling".
                 if classMetadata.pointee.ClassSize != existingClass.pointee.ClassSize {
                     print("💉 ⚠️ Adding or removing methods on Swift classes is not supported. Your application will likely crash. ⚠️")
                 }
 
+                #if false // replaced by "interpose" code below
                 func byteAddr<T>(_ location: UnsafeMutablePointer<T>) -> UnsafeMutablePointer<UInt8> {
                     return location.withMemoryRebound(to: UInt8.self, capacity: 1) { $0 }
                 }
@@ -133,16 +136,73 @@ public class SwiftInjection: NSObject {
                 let vtableLength = Int(existingClass.pointee.ClassSize -
                     existingClass.pointee.ClassAddressPoint) - vtableOffset
 
-                print("💉 Injected '\(oldClass)'")
                 memcpy(byteAddr(existingClass) + vtableOffset,
                        byteAddr(classMetadata) + vtableOffset, vtableLength)
+                #endif
             }
+
+            print("💉 Injected '\(oldClass)'")
 
             if newClass.isSubclass(of: XCTestCase.self) {
                 testClasses.append(newClass)
 //                if ( [newClass isSubclassOfClass:objc_getClass("QuickSpec")] )
 //                [[objc_getClass("_TtC5Quick5World") sharedWorld]
 //                setCurrentExampleMetadata:nil];
+            }
+        }
+
+        // new mechanism for injection of Swift functions,
+        // using "interpose" API from dynamic loader along
+        // with -Xlinker -interposable other linker flags.
+
+        let main = dlopen(nil, RTLD_NOW)
+        var interposes = Array<dyld_interpose_tuple>()
+
+        // Find all definitions of Swift functions and ...
+        // SwiftUI body properties defined in the new dylib.
+        for suffix in ["fC", "yF", "lF", "tF", "Qrvg"] {
+            findSwiftFunctions("\(tmpfile).dylib", suffix) {
+                (loadedFunc, symbol) in
+                guard let existing = dlsym(main, symbol) else { return }
+                // has this symbol already been interposed?
+                let current = interposed[existing] ?? existing
+                let tuple = dyld_interpose_tuple(
+                    replacement: loadedFunc, replacee: current)
+                interposes.append(tuple)
+                // record functions that have beeen interposed
+                interposed[existing] = loadedFunc
+                interposed[current] = loadedFunc
+                print("💉 Replacing \(demangle(symbol))")
+            }
+        }
+
+        // Using array of new interpose structs
+        interposes.withUnsafeBufferPointer {
+            interps in
+
+            var mostRecentlyLoaded = true
+            // Apply interposes to all images in the app bundle
+            // as well as the most recently loaded "new" dylib.
+            findImages { image, header in
+                if mostRecentlyLoaded {
+                    // Need to apply all previous interposes
+                    // to the newly loaded dylib as well.
+                    var previous = Array<dyld_interpose_tuple>()
+                    for (replacee, replacement) in interposed {
+                        previous.append(dyld_interpose_tuple(
+                                replacement: replacement, replacee: replacee))
+                    }
+                    previous.withUnsafeBufferPointer {
+                        interps in
+                        dyld_dynamic_interpose(header,
+                                           interps.baseAddress!, interps.count)
+                    }
+                    mostRecentlyLoaded = false
+                }
+                // patch out symbols defined by new dylib.
+                dyld_dynamic_interpose(header,
+                                       interps.baseAddress!, interps.count)
+//                print("Patched \(String(cString: image))")
             }
         }
 
@@ -160,13 +220,26 @@ public class SwiftInjection: NSObject {
                     }
                     testQueue.resume()
                 })
-                RunLoop.main.add(timer, forMode: RunLoopMode.commonModes)
+                RunLoop.main.add(timer, forMode: RunLoop.Mode.common)
             }
         } else {
             var injectedClasses = [AnyClass]()
+            let injectedSEL = #selector(SwiftInjected.injected)
+            typealias ClassIMP = @convention(c) (AnyClass, Selector) -> ()
             for cls in oldClasses {
-                if class_getInstanceMethod(cls, #selector(SwiftInjected.injected)) != nil {
+                if let classMethod = class_getClassMethod(cls, injectedSEL) {
+                    let classIMP = method_getImplementation(classMethod)
+                    unsafeBitCast(classIMP, to: ClassIMP.self)(cls, injectedSEL)
+                }
+                if class_getInstanceMethod(cls, injectedSEL) != nil {
                     injectedClasses.append(cls)
+                    print("""
+                        💉 Class \(cls) has an @objc injected() method. \
+                        Injection will attempt a "sweep" of all live \
+                        instances to determine which objects to message. \
+                        If this crashes, subscribe to the global notification \
+                        "INJECTION_BUNDLE_NOTIFICATION" to detect injections instead.
+                        """)
                     let kvoName = "NSKVONotifying_" + NSStringFromClass(cls)
                     if let kvoCls = NSClassFromString(kvoName) {
                         injectedClasses.append(kvoCls)
@@ -208,6 +281,22 @@ public class SwiftInjection: NSObject {
         }
     }
 
+    public class func demangle(_ mangledNameUTF8: UnsafePointer<Int8>) -> String {
+        let demangledNamePtr = _stdlib_demangleImpl(
+            mangledName: mangledNameUTF8,
+            mangledNameLength: UInt(strlen(mangledNameUTF8)),
+            outputBuffer: nil,
+            outputBufferSize: nil,
+            flags: 0)
+
+        if let demangledNamePtr = demangledNamePtr {
+            let demangledName = String(cString: demangledNamePtr)
+            free(demangledNamePtr)
+            return demangledName
+        }
+        return String(cString: mangledNameUTF8)
+    }
+
     @objc(vaccine:)
     public class func performVaccineInjection(_ object: AnyObject) {
         let vaccine = Vaccine()
@@ -224,7 +313,7 @@ public class SwiftInjection: NSObject {
             vc.view.addSubview(v)
             UIView.animate(withDuration: 0.2,
                            delay: 0.0,
-                           options: UIViewAnimationOptions.curveEaseIn,
+                           options: UIView.AnimationOptions.curveEaseIn,
                            animations: {
                             v.alpha = 0.0
             }, completion: { _ in v.removeFromSuperview() })
@@ -258,6 +347,10 @@ class SwiftSweeper {
     }
 
     func sweepValue(_ value: Any) {
+        /// Skip values that cannot be cast into `AnyObject` because they end up being `nil`
+        /// Fixes a potential crash that the value is not accessible during injection.
+        guard value as? AnyObject != nil else { return }
+
         let mirror = Mirror(reflecting: value)
         if var style = mirror.displayStyle {
             if _typeName(mirror.subjectType).hasPrefix("Swift.ImplicitlyUnwrappedOptional<") {
@@ -285,6 +378,8 @@ class SwiftSweeper {
                 }
             case .tuple, .struct:
                 sweepMembers(value)
+            @unknown default:
+                break
             }
         }
     }
@@ -435,23 +530,7 @@ func _stdlib_demangleImpl(
     ) -> UnsafeMutablePointer<CChar>?
 
 public func _stdlib_demangleName(_ mangledName: String) -> String {
-    return mangledName.utf8CString.withUnsafeBufferPointer {
-        (mangledNameUTF8) in
-
-        let demangledNamePtr = _stdlib_demangleImpl(
-            mangledName: mangledNameUTF8.baseAddress,
-            mangledNameLength: UInt(mangledNameUTF8.count - 1),
-            outputBuffer: nil,
-            outputBufferSize: nil,
-            flags: 0)
-
-        if let demangledNamePtr = demangledNamePtr {
-            let demangledName = String(cString: demangledNamePtr)
-            free(demangledNamePtr)
-            return demangledName
-        }
-        return mangledName
-    }
+    return mangledName.withCString { SwiftInjection.demangle($0) }
 }
 #endif
 #endif

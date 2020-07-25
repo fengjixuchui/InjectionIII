@@ -5,7 +5,7 @@
 //  Created by John Holdsworth on 02/11/2017.
 //  Copyright © 2017 John Holdsworth. All rights reserved.
 //
-//  $Id: //depot/ResidentEval/InjectionBundle/SwiftEval.swift#114 $
+//  $Id: //depot/ResidentEval/InjectionBundle/SwiftEval.swift#131 $
 //
 //  Basic implementation of a Swift "eval()" including the
 //  mechanics of recompiling a class and loading the new
@@ -113,18 +113,23 @@ extension NSObject {
             unsafeBitCast(self, to: SwiftEvalImpl.self).evalImpl?(_ptr: ptr)
         }
         let out = ptr.pointee
-        ptr.deallocate(capacity: 1)
+        ptr.deallocate()
         return out
     }
 }
 
-fileprivate extension String {
+fileprivate extension StringProtocol {
     subscript(range: NSRange) -> String? {
-        return Range(range, in: self).flatMap { String(self[$0]) }
+        return Range(range, in: String(self)).flatMap { String(self[$0]) }
     }
     func escaping(_ chars: String, with template: String = "\\$0") -> String {
         return self.replacingOccurrences(of: "[\(chars)]",
-            with: template.replacingOccurrences(of: "\\", with: "\\\\"), options: [.regularExpression])
+            with: template.replacingOccurrences(of: "\\", with: "\\\\"),
+            options: [.regularExpression])
+    }
+    func unescape() -> String {
+        return replacingOccurrences(of: #"\\(.)"#, with: "$1",
+                                    options: .regularExpression)
     }
 }
 
@@ -164,6 +169,8 @@ public class SwiftEval: NSObject {
     }
 
     @objc public var injectionNumber = 0
+    @objc public var lastIdeProcPath = ""
+
     static var compileByClass = [String: (String, String)]()
 
     static var buildCacheFile = "/tmp/eval_builds.plist"
@@ -173,9 +180,11 @@ public class SwiftEval: NSObject {
         // Largely obsolete section used find Xcode paths from source file being injected.
 
         let sourceURL = URL(fileURLWithPath: classNameOrFile.hasPrefix("/") ? classNameOrFile : #file)
-        guard let derivedData = findDerivedData(url: URL(fileURLWithPath: NSHomeDirectory())) ??
-            findDerivedData(url: sourceURL) else {
-                throw evalError("Could not locate derived data. Is the project under you home directory?")
+        guard let derivedData = findDerivedData(url: URL(fileURLWithPath: NSHomeDirectory()), ideProcPath: self.lastIdeProcPath) ??
+            (self.projectFile != nil ?
+                findDerivedData(url: URL(fileURLWithPath: self.projectFile!), ideProcPath: self.lastIdeProcPath) :
+                findDerivedData(url: sourceURL, ideProcPath: self.lastIdeProcPath)) else {
+                throw evalError("Could not locate derived data. Is the project under your home directory?")
         }
         guard let (projectFile, logsDir) =
             self.derivedLogs
@@ -186,7 +195,7 @@ public class SwiftEval: NSObject {
                 findProject(for: sourceURL, derivedData: derivedData) else {
                     throw evalError("""
                         Could not locate containing project or it's logs.
-                        On macOS you need to turn off the App Sandbox.
+                        For a macOS app you need to turn off the App Sandbox.
                         Have you customised the DerivedData path?
                         """)
         }
@@ -204,7 +213,8 @@ public class SwiftEval: NSObject {
         // messy but fast
         guard shell(command: """
             # search through build logs, most recent first
-            for log in `ls -t "\(logsDir.path)/"*.xcactivitylog`; do
+            cd "\(logsDir.path.escaping("$"))"
+            for log in `ls -t *.xcactivitylog`; do
                 #echo "Scanning $log"
                 /usr/bin/env perl <(cat <<'PERL'
                     use English;
@@ -242,7 +252,11 @@ public class SwiftEval: NSObject {
                             .trimmingCharacters(in: .whitespaces)
 
         guard shell(command: """
-            (cd "\(resources)" && for i in 1 2 3 4 5; do if (find . -name '*.nib' -a -newer "\(storyboard)" | grep .nib >/dev/null); then break; fi; sleep 1; done; while (ps auxww | grep -v grep | grep "/ibtool " >/dev/null); do sleep 1; done; for i in `find . -name '*.nib'`; do cp -rf "$i" "\(Bundle.main.bundlePath)/$i"; done >\(logfile) 2>&1)
+            (cd "\(resources.unescape().escaping("$"))" && for i in 1 2 3 4 5; \
+            do if (find . -name '*.nib' -a -newer "\(storyboard)" | \
+            grep .nib >/dev/null); then break; fi; sleep 1; done; \
+            while (ps auxww | grep -v grep | grep "/ibtool " >/dev/null); do sleep 1; done; \
+            for i in `find . -name '*.nib'`; do cp -rf "$i" "\(Bundle.main.bundlePath)/$i"; done >\(logfile) 2>&1)
             """) else {
                 throw evalError("Re-compilation failed (\(tmpDir)/command.sh)\n\(try! String(contentsOfFile: logfile))")
         }
@@ -250,13 +264,41 @@ public class SwiftEval: NSObject {
         _ = evalError("Copied \(storyboard)")
     }
 
+    public func actualCase(path: String) -> String? {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: path) {
+            return path
+        }
+        var out = ""
+        for component in path.split(separator: "/") {
+            var real: String?
+            if fm.fileExists(atPath: out+"/"+component) {
+                real = String(component)
+            } else {
+                guard let contents = try? fm.contentsOfDirectory(atPath: "/"+out) else {
+                    return nil
+                }
+                real = contents.first { $0.lowercased() == component.lowercased() }
+            }
+
+            guard let found = real else {
+                return nil
+            }
+            out += "/" + found
+        }
+        return out
+    }
+
+    let detectFilepaths = try! NSRegularExpression(pattern: "(/(?:[^\\ ]*\\\\.)*[^\\ ]*) ")
+
     @objc public func rebuildClass(oldClass: AnyClass?, classNameOrFile: String, extra: String?) throws -> String {
         let (projectFile, logsDir) = try determineEnvironment(classNameOrFile: classNameOrFile)
 
         // locate compile command for class
 
         injectionNumber += 1
-        let tmpfile = "\(tmpDir)/eval\(injectionNumber)"
+        let tmpfile = URL(fileURLWithPath: tmpDir)
+            .appendingPathComponent("eval\(injectionNumber)").path
         let logfile = "\(tmpfile).log"
 
         guard var (compileCommand, sourceFile) = try SwiftEval.compileByClass[classNameOrFile] ??
@@ -268,6 +310,26 @@ public class SwiftEval: NSObject {
                 There are also restrictions on characters allowed in paths.
                 All paths are also case sensitive is another thing to check.)
                 """)
+        }
+
+        // normalise paths in compile command with the actual casing of files
+
+        for filepath in detectFilepaths.matches(in: compileCommand, options: [],
+                                range: NSMakeRange(0, compileCommand.utf16.count))
+            .compactMap({ compileCommand[$0.range(at: 1)] }) {
+            let unescaped = filepath.unescape()
+            if let normalised = actualCase(path: unescaped) {
+                let escaped = normalised.escaping("' ${}()&*~")
+                if filepath != escaped {
+                    print("""
+                            💉 Mapped: \(filepath)
+                            💉 ... to: \(escaped)
+                            """)
+                    compileCommand = compileCommand
+                        .replacingOccurrences(of: filepath, with: escaped,
+                                              options: .caseInsensitive)
+                }
+            }
         }
 
         // load and patch class source if there is an extension to add
@@ -345,7 +407,7 @@ public class SwiftEval: NSObject {
 
         if signer != nil {
             guard signer!("\(tmpfile).dylib") else {
-                throw evalError("Codesign failed")
+                throw evalError("Codesign failed. If you are using macOS 11 (Big Sur), Please download a new release from https://github.com/johnno1962/InjectionIII/releases")
             }
         }
         else {
@@ -362,6 +424,12 @@ public class SwiftEval: NSObject {
             }
             #endif
         }
+
+        // Reset dylib to prevent macOS 10.15 from blocking it
+        let url = URL(fileURLWithPath: "\(tmpfile).dylib")
+        let dylib = try Data(contentsOf: url)
+        try filemgr.removeItem(at: url)
+        try dylib.write(to: url)
 
         return tmpfile
     }
@@ -397,20 +465,27 @@ public class SwiftEval: NSObject {
         else {
             // grep out symbols for classes being injected from object file
 
-            try injectGenerics(tmpfile: tmpfile, handle: dl)
+            let classSymbolNames = try extractClasSymbols(tmpfile: tmpfile)
 
-            guard shell(command: """
-                \(xcodeDev)/Toolchains/XcodeDefault.xctoolchain/usr/bin/nm \(tmpfile).o | grep -E ' S _OBJC_CLASS_\\$_| _(_T0|\\$S|\\$s).*CN$' | awk '{print $3}' >\(tmpfile).classes
-                """) else {
-                throw evalError("Could not list class symbols")
-            }
-            guard var symbols = (try? String(contentsOfFile: "\(tmpfile).classes"))?.components(separatedBy: "\n") else {
-                throw evalError("Could not load class symbol list")
-            }
-            symbols.removeLast()
-
-            return Set(symbols.flatMap { dlsym(dl, String($0.dropFirst())) }).map { unsafeBitCast($0, to: AnyClass.self) }
+            return Set(classSymbolNames.compactMap {
+                dlsym(dl, String($0.dropFirst())) })
+                .map { unsafeBitCast($0, to: AnyClass.self) }
         }
+    }
+
+    func extractClasSymbols(tmpfile: String) throws -> [String] {
+
+        guard shell(command: """
+            \(xcodeDev)/Toolchains/XcodeDefault.xctoolchain/usr/bin/nm \(tmpfile).o | grep -E ' S _OBJC_CLASS_\\$_| _(_T0|\\$S|\\$s).*CN$' | awk '{print $3}' >\(tmpfile).classes
+            """) else {
+            throw evalError("Could not list class symbols")
+        }
+        guard var symbols = (try? String(contentsOfFile: "\(tmpfile).classes"))?.components(separatedBy: "\n") else {
+            throw evalError("Could not load class symbol list")
+        }
+        symbols.removeLast()
+
+        return symbols
     }
 
     func findCompileCommand(logsDir: URL, classNameOrFile: String, tmpfile: String) throws -> (compileCommand: String, sourceFile: String)? {
@@ -418,15 +493,21 @@ public class SwiftEval: NSObject {
         // Objective-C paths can only contain space and '
         // project file itself can only contain spaces
         let isFile = classNameOrFile.hasPrefix("/")
-        let sourceRegex = isFile ? "\\Q\(classNameOrFile)\\E" : "/\(classNameOrFile)\\.(?:swift|mm?)"
-        let swiftEscaped = (isFile ? "" : "[^\"]*?") + sourceRegex.escaping("'$", with: "\\E\\\\*$0\\Q")
-        let objcEscaped = (isFile ? "" : "\\S*?") + sourceRegex.escaping("' ")
-        var regexp = " -(?:primary-file|c(?<! -frontend -c)) (?:\\\\?\"(\(swiftEscaped))\\\\?\"|(\(objcEscaped))) "
+        let sourceRegex = isFile ?
+            #"\Q\#(classNameOrFile)\E"# : #"/\#(classNameOrFile)\.\w+"#
+        let swiftEscaped = (isFile ? "" : #"[^"]*?"#) + sourceRegex.escaping("'$", with: #"\E\\*$0\Q"#)
+        let objcEscaped = (isFile ? "" :
+            #"(?:/(?:[^/\\]*\\.)*[^/\\ ]+)+"#) +
+            sourceRegex.escaping("' {}()&*")
+        var regexp = #" -(?:primary-file|c(?<! -frontend -c)) (?:\\?"(\#(swiftEscaped))\\?"|(\#(objcEscaped))) "#
+
+//        print(regexp)
 
         // messy but fast
         guard shell(command: """
             # search through build logs, most recent first
-            for log in `ls -t "\(logsDir.path)/"*.xcactivitylog`; do
+            cd "\(logsDir.path.escaping("$"))"
+            for log in `ls -t *.xcactivitylog`; do
                 #echo "Scanning $log"
                 /usr/bin/env perl <(cat <<'PERL'
                     use JSON::PP;
@@ -445,7 +526,7 @@ public class SwiftEval: NSObject {
                         if ($line =~ /^\\s*cd /) {
                             $realPath = $line;
                         }
-                        elsif ($line =~ m@\(regexp.escaping("\"$"))@o and $line =~ " \(arch)") {
+                        elsif ($line =~ m@\(regexp.escaping("\"$"))@oi and $line =~ " \(arch)") {
                             # found compile command
                             # may need to extract file list
                             if ($line =~ / -filelist /) {
@@ -495,7 +576,7 @@ public class SwiftEval: NSObject {
 //            // escape ( & ) outside quotes
 //            .replacingOccurrences(of: "[()](?=(?:(?:[^\"]*\"){2})*[^\"]$)", with: "\\\\$0", options: [.regularExpression])
             // (logs of new build system escape ', $ and ")
-            .replacingOccurrences(of: "\\\\([\"'\\\\])", with: "$1", options: [.regularExpression])
+            .replacingOccurrences(of: #"\\([\"'\\])"#, with: "$1", options: [.regularExpression])
             // pch file may no longer exist
             .replacingOccurrences(of: " -pch-output-dir \\S+ ", with: " ", options: [.regularExpression])
 
@@ -515,100 +596,65 @@ public class SwiftEval: NSObject {
             throw evalError("Regexp parse error: \(error) -- \(regexp)")
         }
 
-        guard let matches = fileExtractor.firstMatch(in: compileCommand, options: [],
-                                                     range: NSMakeRange(0, compileCommand.utf16.count)),
-            let sourceFile = compileCommand[matches.range(at: 1)] ??
+        guard let matches = fileExtractor
+            .firstMatch(in: compileCommand, options: [],
+                        range: NSMakeRange(0, compileCommand.utf16.count)),
+            var sourceFile = compileCommand[matches.range(at: 1)] ??
                              compileCommand[matches.range(at: 2)] else {
             throw evalError("Could not locate source file \(compileCommand) -- \(regexp)")
         }
 
-        return (compileCommand, sourceFile.replacingOccurrences(of: "\\$", with: "$"))
+        sourceFile = actualCase(path: sourceFile.unescape()) ?? sourceFile
+        return (compileCommand, sourceFile)
     }
 
-    lazy var mainHandle = dlopen(nil, RTLD_NOLOAD)
-
-    func injectGenerics(tmpfile: String, handle: UnsafeMutableRawPointer) throws {
-
-        guard shell(command: """
-            \(xcodeDev)/Toolchains/XcodeDefault.xctoolchain/usr/bin/nm \(tmpfile).o | grep -E ' __T0.*CMn$' | awk '{print $3}' >\(tmpfile).generics
-            """) else {
-                throw evalError("Could not list generics symbols")
-        }
-        guard var generics = (try? String(contentsOfFile: "\(tmpfile).generics"))?.components(separatedBy: "\n") else {
-            throw evalError("Could not load generics symbol list")
-        }
-        generics.removeLast()
-
-        struct NominalTypeDescriptor {
-            let Name: UInt32 = 0, NumFields: UInt32 = 0
-            let FieldOffsetVectorOffset: UInt32 = 0, FieldNames: UInt32 = 0
-            let GetFieldTypes: UInt32 = 0, SadnessAndKind: UInt32 = 0
+    func getAppCodeDerivedData(procPath: String) -> String {
+        //Default with current year
+        let derivedDataPath = { (year: Int, pathSelector: String) -> String in
+            "Library/Caches/\(year > 2019 ? "JetBrains/" : "")\(pathSelector)/DerivedData"
         }
 
-        struct TargetGenericMetadata {
-            let CreateFunction: uintptr_t = 0, MetadataSize: UInt32 = 0
-            let NumKeyArguments: UInt16 = 0, AddressPoint: UInt16 = 0
+        let year = Calendar.current.component(.year, from: Date())
+        let month = Calendar.current.component(.month, from: Date())
 
-            let PrivateData1: uintptr_t = 0, PrivateData2: uintptr_t = 0
-            let PrivateData3: uintptr_t = 0, PrivateData4: uintptr_t = 0
-            let PrivateData5: uintptr_t = 0, PrivateData6: uintptr_t = 0
-            let PrivateData7: uintptr_t = 0, PrivateData8: uintptr_t = 0
-            let PrivateData9: uintptr_t = 0, PrivateData10: uintptr_t = 0
-            let PrivateData11: uintptr_t = 0, PrivateData12: uintptr_t = 0
-            let PrivateData13: uintptr_t = 0, PrivateData14: uintptr_t = 0
-            let PrivateData15: uintptr_t = 0, PrivateData16: uintptr_t = 0
+        let defaultPath = derivedDataPath(year, "AppCode\(month / 4 == 0 ? year - 1 : year).\(month / 4 + (month / 4 == 0 ? 3 : 0))")
 
-            let Destructor: uintptr_t = 0, Witness: uintptr_t = 0
-            let MetaClass: uintptr_t = 0, SuperClass: uintptr_t = 0
-            let CacheData1: uintptr_t = 0, CacheData2: uintptr_t = 0
-            let Data: uintptr_t = 0
+        var plistPath = URL(fileURLWithPath: procPath)
+        plistPath.deleteLastPathComponent()
+        plistPath.deleteLastPathComponent()
+        plistPath = plistPath.appendingPathComponent("Info.plist")
 
-            let Flags: UInt32 = 0, InstanceAddressPoint: UInt32 = 0
-            let InstanceSize: UInt32 = 0
-            let InstanceAlignMask: UInt16 = 0, Reserved: UInt16 = 0
-            let ClassSize: UInt32 = 0, ClassAddressPoint: UInt32 = 0
+        guard let dictionary = NSDictionary(contentsOf: plistPath) as? Dictionary<String, Any> else { return defaultPath }
+        guard let jvmOptions = dictionary["JVMOptions"] as? Dictionary<String, Any> else { return defaultPath }
+        guard let properties = jvmOptions["Properties"] as? Dictionary<String, Any> else { return defaultPath }
+        guard let pathSelector: String = properties["idea.paths.selector"] as? String else { return defaultPath }
 
-            var DescriptionOffset: uintptr_t = 0
-        }
+        let components = pathSelector.replacingOccurrences(of: "AppCode", with: "").components(separatedBy: ".")
+        guard components.count == 2 else { return defaultPath }
 
-        func getPattern(handle: UnsafeMutableRawPointer!, sym: String) -> UnsafeMutablePointer<TargetGenericMetadata>? {
-            if let desc = dlsym(handle, String(sym.dropFirst()))?
-                .assumingMemoryBound(to: NominalTypeDescriptor.self),
-                desc.pointee.SadnessAndKind != 0 {
-                return desc.withMemoryRebound(to: UInt8.self, capacity: 1) {
-                    ($0 + Int(desc.pointee.SadnessAndKind) + 5 * MemoryLayout<UInt32>.size)
-                        .withMemoryRebound(to: TargetGenericMetadata.self, capacity: 1) {
-                            $0
-                    }
-                }
-            }
-            return nil
-        }
-
-        for generic in generics {
-            if let newpattern = getPattern(handle: handle, sym: generic),
-                let oldpattern = getPattern(handle: mainHandle, sym: generic) {
-                let save = oldpattern.pointee.DescriptionOffset
-                memcpy(oldpattern, newpattern, Int(oldpattern.pointee.MetadataSize))
-                oldpattern.pointee.DescriptionOffset = save
-            }
-        }
+        guard let realYear = Int(components[0]) else { return defaultPath }
+        return derivedDataPath(realYear, pathSelector)
     }
 
-    func findDerivedData(url: URL) -> URL? {
+    func findDerivedData(url: URL, ideProcPath: String) -> URL? {
         if url.path == "/" {
             return nil
         }
 
-        for relative in ["DerivedData", "build/DerivedData",
-                         "Library/Developer/Xcode/DerivedData"] {
+        var relativeDirs = ["DerivedData", "build/DerivedData"]
+        if ideProcPath.lowercased().contains("appcode") {
+            relativeDirs.append(getAppCodeDerivedData(procPath: ideProcPath))
+        } else {
+            relativeDirs.append("Library/Developer/Xcode/DerivedData")
+        }
+        for relative in relativeDirs {
             let derived = url.appendingPathComponent(relative)
             if FileManager.default.fileExists(atPath: derived.path) {
                 return derived
             }
         }
 
-        return findDerivedData(url: url.deletingLastPathComponent())
+        return findDerivedData(url: url.deletingLastPathComponent(), ideProcPath: ideProcPath)
     }
 
     func findProject(for source: URL, derivedData: URL) -> (projectFile: URL, logsDir: URL)? {
@@ -656,42 +702,73 @@ public class SwiftEval: NSObject {
     }
 
     func shell(command: String) -> Bool {
-        try? command.write(toFile: "\(tmpDir)/command.sh", atomically: false, encoding: .utf8)
+        let commandFile = "\(tmpDir)/command.sh"
+        try! command.write(toFile: commandFile, atomically: false, encoding: .utf8)
         debug(command)
+        return runner.run(script: commandFile)
+    }
 
-        #if !(os(iOS) || os(tvOS))
-        let task = Process()
-        task.launchPath = "/bin/bash"
-        task.arguments = ["-c", command]
-        task.launch()
-        task.waitUntilExit()
-        return task.terminationStatus == EXIT_SUCCESS
-        #else
-        let pid = fork()
-        if pid == 0 {
-            var args = [UnsafeMutablePointer<Int8>?](repeating: nil, count: 4)
-            args[0] = strdup("/bin/bash")!
-            args[1] = strdup("-c")!
-            args[2] = strdup(command)!
-            args.withUnsafeMutableBufferPointer {
-                _ = execve($0.baseAddress![0], $0.baseAddress!, nil) // _NSGetEnviron().pointee)
-                fatalError("execve() fails \(String(cString: strerror(errno)))")
+    let runner = ScriptRunner()
+
+    class ScriptRunner {
+        let commandsOut: UnsafeMutablePointer<FILE>
+        let statusesIn: UnsafeMutablePointer<FILE>
+
+        init() {
+            let ForReading = 0, ForWriting = 1
+            var commandsPipe = [Int32](repeating: 0, count: 2)
+            var statusesPipe = [Int32](repeating: 0, count: 2)
+            pipe(&commandsPipe)
+            pipe(&statusesPipe)
+
+            if fork() == 0 {
+                let commandsIn = fdopen(commandsPipe[ForReading], "r")
+                let statusesOut = fdopen(statusesPipe[ForWriting], "w")
+                var buffer = [Int8](repeating: 0, count: 4096)
+
+                close(commandsPipe[ForWriting])
+                close(statusesPipe[ForReading])
+                setbuf(statusesOut, nil)
+
+                while let script = fgets(&buffer, Int32(buffer.count), commandsIn) {
+                    script[strlen(script)-1] = 0
+
+                    let pid = fork()
+                    if pid == 0 {
+                        var argv = [UnsafeMutablePointer<Int8>?](repeating: nil, count: 3)
+                        argv[0] = strdup("/bin/bash")!
+                        argv[1] = strdup(script)!
+                        _ = execve(argv[0], &argv, nil)
+                        fatalError("execve() fails \(String(cString: strerror(errno)))")
+                    }
+
+                    var status: Int32 = 0
+                    while waitpid(pid, &status, 0) == -1 {}
+                    fputs("\(status >> 8)\n", statusesOut)
+                }
+
+                exit(0)
             }
+
+            commandsOut = fdopen(commandsPipe[ForWriting], "w")
+            statusesIn = fdopen(statusesPipe[ForReading], "r")
+
+            close(commandsPipe[ForReading])
+            close(statusesPipe[ForWriting])
+            setbuf(commandsOut, nil)
         }
 
-        var status: Int32 = 0
-        while waitpid(pid, &status, 0) == -1 {}
-        return status >> 8 == EXIT_SUCCESS
-        #endif
+        func run(script: String) -> Bool {
+            fputs("\(script)\n", commandsOut)
+            var buffer = [Int8](repeating: 0, count: 10)
+            fgets(&buffer, Int32(buffer.count), statusesIn)
+            return buffer[0] == "0".utf8.first!
+        }
     }
 }
 
-#if os(iOS) || os(tvOS)
 @_silgen_name("fork")
 func fork() -> Int32
 @_silgen_name("execve")
 func execve(_ __file: UnsafePointer<Int8>!, _ __argv: UnsafePointer<UnsafeMutablePointer<Int8>?>!, _ __envp: UnsafePointer<UnsafeMutablePointer<Int8>?>!) -> Int32
-@_silgen_name("_NSGetEnviron")
-func _NSGetEnviron() -> UnsafePointer<UnsafePointer<UnsafeMutablePointer<Int8>?>?>!
-#endif
 #endif
